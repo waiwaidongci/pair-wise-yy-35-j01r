@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from . import seal
+from .domain import (ConflictError, NotFoundError, ValidationError, ensure_role,
+                     normalize_severity, require_number, require_text)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
-                    validate_transition)
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, SEAL_ENTITY,
+                    SEAL_GENERATE_ROLES, SEAL_VERIFY_ROLES, TITLE, VIEW_ROLES,
+                    completion_blockers, escalation_required, priority_score,
+                    response_deadline_hours, role_for_transition, validate_transition)
 
 
 class Service:
@@ -90,6 +92,55 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    def generate_seal(self, payload: Dict[str, Any], actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, SEAL_GENERATE_ROLES)
+        actor = require_text(actor, "actor", 100)
+        seal_no = require_text(payload.get("seal_no"), "seal_no", 100)
+        end_event_id = payload.get("end_event_id")
+        if isinstance(end_event_id, bool) or not isinstance(end_event_id, int) \
+                or end_event_id < 1:
+            raise ValidationError("end_event_id必须是正整数")
+        existing = self.repository.get_seal(seal_no)
+        if existing is not None:
+            return existing
+        events = self.repository.list_audit_until(end_event_id)
+        if not events or events[-1]["id"] != end_event_id:
+            raise NotFoundError("审计事件不存在")
+        bad_event_id = seal.chain_first_bad(events)
+        if bad_event_id is not None:
+            raise ConflictError(f"审计链在事件{bad_event_id}处已损坏，无法封装")
+        package = seal.build_package(seal_no, events)
+        try:
+            result = self.repository.save_seal(package, actor)
+        except ConflictError:
+            return self.repository.get_seal(seal_no)
+        self.repository.append_audit("seal", SEAL_ENTITY, result["id"], actor, {
+            "seal_no": seal_no, "end_event_id": end_event_id,
+            "entry_count": result["entry_count"],
+        })
+        return result
+
+    def get_seal(self, seal_no: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, SEAL_VERIFY_ROLES)
+        seal_no = require_text(seal_no, "seal_no", 100)
+        package = self.repository.get_seal(seal_no)
+        if package is None:
+            raise NotFoundError("封装不存在")
+        return package
+
+    def list_seals(self, role: str) -> list:
+        ensure_role(role, SEAL_VERIFY_ROLES)
+        return self.repository.list_seals()
+
+    def verify_seal(self, seal_no: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, SEAL_VERIFY_ROLES)
+        seal_no = require_text(seal_no, "seal_no", 100)
+        package = self.repository.get_seal(seal_no)
+        if package is None:
+            raise NotFoundError("封装不存在")
+        events = self.repository.list_audit_until(package["end_event_id"])
+        return seal.verify_package(package, events)
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:

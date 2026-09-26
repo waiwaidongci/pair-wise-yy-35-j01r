@@ -65,6 +65,24 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS audit_seals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seal_no TEXT NOT NULL UNIQUE,
+                    start_event_id INTEGER NOT NULL,
+                    end_event_id INTEGER NOT NULL,
+                    entry_count INTEGER NOT NULL,
+                    start_hash TEXT NOT NULL,
+                    end_hash TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS audit_seal_entries (
+                    seal_id INTEGER NOT NULL REFERENCES audit_seals(id) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    event_id INTEGER NOT NULL,
+                    entry_hash TEXT NOT NULL,
+                    PRIMARY KEY (seal_id, seq)
+                );
             """)
 
     @staticmethod
@@ -191,6 +209,62 @@ class Repository:
             item["detail"] = json.loads(item["detail"])
             result.append(item)
         return result
+
+    def list_audit_until(self, end_event_id: int) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM audit_events WHERE id<=? ORDER BY id", (end_event_id,)
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item["detail"])
+            result.append(item)
+        return result
+
+    def save_seal(self, package: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """INSERT INTO audit_seals(seal_no, start_event_id, end_event_id,
+                       entry_count, start_hash, end_hash, created_by, created_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (package["seal_no"], package["start_event_id"],
+                     package["end_event_id"], package["entry_count"],
+                     package["start_hash"], package["end_hash"], actor, now),
+                )
+                seal_id = int(cur.lastrowid)
+                self.conn.executemany(
+                    """INSERT INTO audit_seal_entries(seal_id, seq, event_id, entry_hash)
+                       VALUES(?,?,?,?)""",
+                    [(seal_id, entry["seq"], entry["event_id"], entry["entry_hash"])
+                     for entry in package["entries"]],
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("封装号已存在") from exc
+        return self.get_seal(package["seal_no"])
+
+    def get_seal(self, seal_no: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM audit_seals WHERE seal_no=?", (seal_no,)
+            ).fetchone()
+            if row is None:
+                return None
+            entries = self.conn.execute(
+                """SELECT seq, event_id, entry_hash FROM audit_seal_entries
+                   WHERE seal_id=? ORDER BY seq""",
+                (row["id"],),
+            ).fetchall()
+        package = dict(row)
+        package["entries"] = [dict(entry) for entry in entries]
+        return package
+
+    def list_seals(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM audit_seals ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
 
     def verify_audit_chain(self) -> bool:
         from .audit import calculate_hash

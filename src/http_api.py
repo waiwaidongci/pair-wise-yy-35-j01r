@@ -4,7 +4,7 @@ import json
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
                      ValidationError)
@@ -94,6 +94,15 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, service.get_item(item_id, role))
+                elif path == "/api/audit/seals":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"seals": service.list_seals(role)})
+                elif path.startswith("/api/audit/seals/"):
+                    seal_no = unquote(path.split("/")[4])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_seal(seal_no, role))
                 elif path == "/api/audit":
                     actor, role = self._identity()
                     del actor
@@ -110,6 +119,11 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path == "/api/audit/seals":
+                    self._json(201, service.generate_seal(body, actor, role))
+                elif path.startswith("/api/audit/seals/") and path.endswith("/verify"):
+                    seal_no = unquote(path.split("/")[4])
+                    self._json(200, service.verify_seal(seal_no, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))

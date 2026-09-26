@@ -11,6 +11,7 @@
 - `src/service.py`：权限检查、用例编排、并发控制和审计。
 - `src/http_api.py`：JSON路由和统一错误响应。
 - `src/audit.py`：UTC时间和SHA-256审计事件。
+- `src/seal.py`：审计完整性封装规则，按原顺序重算并定位首个异常事件。
 - `static/index.html`：最小演示页。
 - `tests/`：完整流程、规则和失败测试。
 
@@ -31,8 +32,11 @@ python3 app.py --db ./data.db --port 8312
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
+- `POST /api/audit/seals`，仅管理员，按`end_event_id`生成封装（封装号、起止摘要、条目数、逐条摘要），同封装号重试沿用首次结果
+- `GET /api/audit/seals` 与 `GET /api/audit/seals/{seal_no}`
+- `POST /api/audit/seals/{seal_no}/verify`，按原顺序重算，缺行、重排或内容改动返回失败并指出首个异常事件ID；封装只覆盖生成时的结束位置，之后新录事件不影响旧包
 
-允许角色：dosimetrist, radiation_officer, health_physicist, viewer。剂量与调查水平之比决定升级程度，超过阈值必须进入调查；更正剂量不能覆盖已确认审计记录。
+允许角色：dosimetrist, radiation_officer, health_physicist, viewer, admin。剂量与调查水平之比决定升级程度，超过阈值必须进入调查；更正剂量不能覆盖已确认审计记录。
 
 ## 测试
 
