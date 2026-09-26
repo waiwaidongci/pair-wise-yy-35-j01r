@@ -98,6 +98,21 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                elif path == "/api/audit/packages":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"packages": service.list_packages(role)})
+                elif path.startswith("/api/audit/packages/") \
+                        and path.endswith("/verify"):
+                    package_no = path[len("/api/audit/packages/"):-len("/verify")]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.verify_package(package_no, role))
+                elif path.startswith("/api/audit/packages/"):
+                    package_no = path.rsplit("/", 1)[-1]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_package(package_no, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -119,6 +134,9 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif path == "/api/audit/packages":
+                    self._json(201, service.seal_package(
+                        body.get("end_event_id"), actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

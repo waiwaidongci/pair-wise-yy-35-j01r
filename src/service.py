@@ -4,10 +4,11 @@ from typing import Any, Dict, Optional
 
 from .domain import ensure_role, normalize_severity, require_number, require_text
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, SEAL_ROLES,
+                    TITLE, VIEW_ROLES, completion_blockers, escalation_required,
                     priority_score, response_deadline_hours, role_for_transition,
                     validate_transition)
+from .seal import verify_package
 
 
 class Service:
@@ -90,6 +91,41 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    def seal_package(self, end_event_id: Any, actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, SEAL_ROLES)
+        actor = require_text(actor, "actor", 100)
+        if isinstance(end_event_id, bool) or not isinstance(end_event_id, int) \
+                or end_event_id < 1:
+            raise ValueError("end_event_id必须是正整数")
+        return self.repository.seal_audit_package(end_event_id, actor)
+
+    def list_packages(self, role: str) -> list:
+        ensure_role(role, AUDIT_ROLES)
+        return self.repository.list_audit_packages()
+
+    def get_package(self, package_no: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, AUDIT_ROLES)
+        package_no = require_text(package_no, "package_no", 40)
+        package = self.repository.get_audit_package(package_no)
+        if package is None:
+            from .domain import NotFoundError
+            raise NotFoundError("完整性包不存在")
+        return package
+
+    def verify_package(self, package_no: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, AUDIT_ROLES)
+        package_no = require_text(package_no, "package_no", 40)
+        package = self.repository.get_audit_package(package_no)
+        if package is None:
+            from .domain import NotFoundError
+            raise NotFoundError("完整性包不存在")
+        # 只取封装覆盖的区间，之后新录的审计事件不混入验证
+        events = self.repository.audit_events_in_range(
+            package["start_event_id"], package["end_event_id"])
+        result = verify_package(package, events)
+        result["package_no"] = package_no
+        return result
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:

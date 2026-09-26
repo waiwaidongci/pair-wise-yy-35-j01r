@@ -65,6 +65,19 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS audit_packages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    package_no TEXT NOT NULL UNIQUE,
+                    start_event_id INTEGER NOT NULL,
+                    end_event_id INTEGER NOT NULL UNIQUE,
+                    start_digest TEXT NOT NULL,
+                    end_digest TEXT NOT NULL,
+                    event_count INTEGER NOT NULL,
+                    entry_digests TEXT NOT NULL,
+                    root_digest TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
             """)
 
     @staticmethod
@@ -209,6 +222,89 @@ class Repository:
                 return False
             previous = row["entry_hash"]
         return True
+
+    def _hydrate_audit(self, rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item["detail"])
+            result.append(item)
+        return result
+
+    def audit_events_in_range(self, start_event_id: int,
+                              end_event_id: int) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM audit_events
+                   WHERE id BETWEEN ? AND ? ORDER BY id""",
+                (start_event_id, end_event_id),
+            ).fetchall()
+        return self._hydrate_audit(rows)
+
+    def get_audit_package(self, package_no: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM audit_packages WHERE package_no=?", (package_no,)
+            ).fetchone()
+        return self._package(row)
+
+    def get_audit_package_by_end(self, end_event_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM audit_packages WHERE end_event_id=?", (end_event_id,)
+            ).fetchone()
+        return self._package(row)
+
+    def list_audit_packages(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM audit_packages ORDER BY id"
+            ).fetchall()
+        return [self._package(row) for row in rows]
+
+    @staticmethod
+    def _package(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        item = dict(row)
+        item["entry_digests"] = json.loads(item["entry_digests"])
+        return item
+
+    def seal_audit_package(self, end_event_id: int, actor: str) -> Dict[str, Any]:
+        """单事务：快照截止事件 -> 规则封装 -> 落库；同号重试沿用首次结果。"""
+        from .seal import build_package
+        with self._lock, self.conn:
+            existing = self.conn.execute(
+                "SELECT * FROM audit_packages WHERE end_event_id=?",
+                (end_event_id,),
+            ).fetchone()
+            if existing is not None:
+                package = self._package(existing)
+                package["reused"] = True
+                return package
+            end_row = self.conn.execute(
+                "SELECT 1 FROM audit_events WHERE id=?", (end_event_id,)
+            ).fetchone()
+            if end_row is None:
+                raise NotFoundError("结束事件不存在，无法封装")
+            snapshot = self._hydrate_audit(self.conn.execute(
+                "SELECT * FROM audit_events WHERE id <= ? ORDER BY id",
+                (end_event_id,),
+            ).fetchall())
+            package = build_package(snapshot, end_event_id, actor)
+            self.conn.execute(
+                """INSERT INTO audit_packages(package_no, start_event_id, end_event_id,
+                   start_digest, end_digest, event_count, entry_digests, root_digest,
+                   created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (package["package_no"], package["start_event_id"],
+                 package["end_event_id"], package["start_digest"],
+                 package["end_digest"], package["event_count"],
+                 json.dumps(package["entry_digests"], ensure_ascii=False),
+                 package["root_digest"], package["created_by"],
+                 package["created_at"]),
+            )
+            package["reused"] = False
+            return package
 
     def close(self) -> None:
         with self._lock:
